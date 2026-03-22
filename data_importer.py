@@ -170,16 +170,53 @@ def process_and_import():
             termekfajta = get_termekfajta(cikk, megnevezes, termekkor, t7, group_to_kind)
             
             darab = pd.to_numeric(krow.get('Mennyiség', 0), errors='coerce')
-            beker_ar = pd.to_numeric(krow.get('Átlag bekerár', 0), errors='coerce')
-            szum_beker = darab * beker_ar
+            if pd.isnull(darab): darab = 0.0
+            
+            szum_beker = 0.0
+            beker_ar = 0.0
+            
+            if not erows.empty:
+                teljesites = erows.iloc[0].get('Teljesítés', teljesites)
+                szum_beker_temp = 0.0
+                sum_darab_elabe = 0.0
+                
+                for _, erow in erows.iterrows():
+                    e_menny = pd.to_numeric(erow.get('Mennyiség', 0), errors='coerce')
+                    if pd.isnull(e_menny): e_menny = 0.0
+                    
+                    e_beker = pd.to_numeric(erow.get('Bekerár', 0), errors='coerce')
+                    if pd.isnull(e_beker) or e_beker == 0.0:
+                        e_beker = pd.to_numeric(erow.get('Átlag bekerár', erow.get('Egységár', 0)), errors='coerce')
+                    if pd.isnull(e_beker): e_beker = 0.0
+                        
+                    szum_beker_temp += (e_menny * e_beker)
+                    sum_darab_elabe += e_menny
+                    
+                if szum_beker_temp > 0:
+                    szum_beker = szum_beker_temp
+                    beker_ar = szum_beker / sum_darab_elabe if sum_darab_elabe > 0 else 0.0
+            
+            # Fallback a kimenő számlából, ha az Elábé üres vagy nullás értéket adott
+            if szum_beker == 0.0:
+                beker_ar = pd.to_numeric(krow.get('Átlag bekerár', 0), errors='coerce')
+                if pd.isnull(beker_ar): beker_ar = 0.0
+                szum_beker = darab * beker_ar
             
             elad_ar = pd.to_numeric(krow.get('Egységár', 0), errors='coerce')
-            szum_elad = elad_ar * darab if pd.notnull(darab) else 0
+            if pd.isnull(elad_ar): elad_ar = 0.0
+            
+            szum_elad = elad_ar * darab
             
             jut_szaz = pd.to_numeric(krow.get('Jutalék %', 0), errors='coerce')
-            jutalek = szum_elad * (jut_szaz / 100.0) if pd.notnull(jut_szaz) else 0
+            if pd.isnull(jut_szaz): jut_szaz = 0.0
+            jutalek = szum_elad * (jut_szaz / 100.0)
             
-            res = szum_elad - szum_beker
+            # A képlet: Rés = SzumElad - SzumBeker, ahol SzumBeker az Elábéből jön (Mennyiség * Beker)
+            # Előlegek/jóváírások miatti korrekció: IF([@SzumElad]<0;[@SzumElad]-[@SzumBeker]*-1;[@SzumElad]-[@SzumBeker])
+            if szum_elad < 0:
+                res = szum_elad - (szum_beker * -1)
+            else:
+                res = szum_elad - szum_beker
                 
             kif = pd.to_numeric(krow.get('Kifizetett összeg', 0), errors='coerce')
             brutto = pd.to_numeric(krow.get('Bruttó végösszeg', 0), errors='coerce')

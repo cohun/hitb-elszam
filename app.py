@@ -4,9 +4,10 @@ import pandas as pd
 import database
 import data_importer
 import time
+import plotly.express as px
 
 # --- Oldal beállítások ---
-st.set_page_config(page_title="H-ITB Elszámolás", layout="wide")
+st.set_page_config(page_title="H-ITB Elszámolás", layout="wide", initial_sidebar_state="collapsed")
 st.title("📊 H-ITB Elszámolás Kezelő")
 
 # Inicializálás
@@ -128,8 +129,24 @@ if view_mode == "📊 Fő Dashboard":
     # Formatálások a jobb olvashatóságért (nem visszamentődik, csak UI)
     view_df = filtered_df[['id', 'Szla', 'Cikk', 'Termékkör', 'Termékfajta', 'Vevő', 'Dátum', 'Megnevezés', 'SzumElad', 'Jut_%', 'Jut', 'Jut_modositott', 'Befolyt', 'Befolyt2', 'ÜK_kifizet_hó', 'KülföldEUR', 'ÜK']]
     
+    def format_editor_currency(val):
+        if pd.isna(val): return ""
+        if isinstance(val, (int, float)):
+            return f"{val:,.0f} Ft".replace(',', ' ')
+        return val
+
+    def format_editor_percent(val):
+        if pd.isna(val): return ""
+        if isinstance(val, (int, float)):
+            return f"{val:.2f}"
+        return val
+
     # Alkalmazzuk a Stylert a fő táblázatra is
-    styled_view_df = view_df.style.apply(color_modified_jut, axis=1)
+    styled_view_df = view_df.style.apply(color_modified_jut, axis=1).format({
+        'SzumElad': format_editor_currency,
+        'Jut': format_editor_currency,
+        'Jut_%': format_editor_percent
+    })
     
     edited_df = st.data_editor(
         styled_view_df,
@@ -267,12 +284,196 @@ if view_mode == "📊 Fő Dashboard":
     elif szla_input:
         st.warning("Nincs ilyen számlaszám az adatbázisban.")
 
-    # --- További Kimutatások / Grafikonok ---
-    st.subheader("📈 Havi aggregációk")
-    if not filtered_df.empty and 'Kelt_hó' in filtered_df.columns:
-        monthly = filtered_df.groupby('Kelt_hó')[['SzumElad', 'Rés']].sum().reset_index()
-        monthly = monthly.rename(columns={'Kelt_hó': 'Hónap', 'SzumElad': 'Bevétel', 'Rés': 'Tiszta Rés'})
-        st.bar_chart(monthly, x='Hónap', y=['Bevétel', 'Tiszta Rés'])
+    # --- SzumBeker és Pivot Kimutatások / Grafikonok ---
+    if not df.empty and 'Kelt_hó' in df.columns:
+        pdf_full = df.copy()
+        
+        # Opcionális Hónap Szűrő
+        available_months = sorted([m for m in pdf_full['Kelt_hó'].unique() if pd.notnull(m)])
+        month_options = ["Összes"] + [str(int(m)) + ". hónap" for m in available_months]
+        selected_month_str = st.selectbox("Szűrés Dátum (Hónap) szerint:", month_options)
+        
+        if selected_month_str != "Összes":
+            sel_m = int(selected_month_str.split('.')[0])
+            pdf = pdf_full[pdf_full['Kelt_hó'] == sel_m]
+        else:
+            pdf = pdf_full
+            
+        if not pdf.empty:
+            # A felhasználó logikája: a "Főcsoport" az valójában a Termékfajta (Alap, Beruházás)
+            # Az "Alcsoport" pedig a Termékkör (Acélsodronyok, stb.)
+            pdf.loc[:, 'Főcsoport'] = pdf['Termékfajta'].replace(['', None], 'Ismeretlen').fillna('Ismeretlen')
+            pdf.loc[:, 'Alcsoport'] = pdf['Termékkör'].replace(['', None], 'Ismeretlen').fillna('Ismeretlen')
+        
+            # Közös formázó függvények mindkét táblázathoz
+            def highlight_pivot(row):
+                idx = str(row.name).replace('\u200B', '') if hasattr(row, 'name') else ''
+                # DataFrame apply esetében name az index; de ha oszlopban tartjuk, lekezeljük:
+                if 'Sum of Árrés' in row: idx = str(row['Sum of Árrés']).replace('\u200B', '')
+                elif 'Sum of SzumElad' in row: idx = str(row.get('Sum of SzumElad', '')).replace('\u200B', '')
+                
+                if idx == "Grand Total":
+                    return ['background-color: #d4edda; color: #155724; font-weight: bold !important;'] * len(row)
+                elif "összesen" in idx:
+                    return ['background-color: #FAFAFA; color: #0E1117; font-weight: bold !important;'] * len(row)
+                else:
+                    return [''] * len(row)
+
+            def format_currency(val):
+                if pd.isna(val): return ""
+                if isinstance(val, (int, float)):
+                    return f"{val:,.0f} Ft".replace(',', ' ')
+                return val
+
+            # ==========================================
+            # 1. SZUMELAD SZEKCIÓ (TÁBLÁZAT + DIAGRAM)
+            # ==========================================
+            st.subheader("🛒 Termékkörök és SzumElad")
+            
+            pivot_main_elad = pd.pivot_table(
+                pdf, values='SzumElad', index='Főcsoport', columns='Kelt_hó',
+                aggfunc='sum', fill_value=0, margins=True, margins_name='Grand Total'
+            )
+            
+            pivot_detail_elad = pd.pivot_table(
+                pdf, values='SzumElad', index=['Főcsoport', 'Alcsoport'], columns='Kelt_hó',
+                aggfunc='sum', fill_value=0, margins=True, margins_name='Grand Total'
+            )
+            
+            rows_elad = []
+            for focsoport, row in pivot_main_elad.iterrows():
+                if focsoport == 'Grand Total':
+                    continue
+                r = row.to_dict()
+                r['Sum of SzumElad'] = f"🔹 {focsoport} összesen"
+                rows_elad.append(r)
+                
+                for (m_fo, m_al), d_row in pivot_detail_elad.iterrows():
+                    if m_fo == focsoport and m_fo != 'Grand Total':
+                        dr = d_row.to_dict()
+                        dr['Sum of SzumElad'] = f"    {m_al}"
+                        rows_elad.append(dr)
+                        
+            if 'Grand Total' in pivot_main_elad.index:
+                gt_e = pivot_main_elad.loc['Grand Total'].to_dict()
+                gt_e['Sum of SzumElad'] = "Grand Total"
+                rows_elad.append(gt_e)
+                
+            final_elad_df = pd.DataFrame(rows_elad)
+            if not final_elad_df.empty:
+                counts_e = {}
+                new_names_e = []
+                for name in final_elad_df['Sum of SzumElad']:
+                    new_names_e.append(name + ('\u200B' * counts_e.get(name, 0)))
+                    counts_e[name] = counts_e.get(name, 0) + 1
+                final_elad_df['Sum of SzumElad'] = new_names_e
+                
+                final_elad_df = final_elad_df.set_index('Sum of SzumElad')
+                final_elad_df = final_elad_df.fillna(0).round(0).astype(int)
+                
+                new_cols_e = []
+                for col in final_elad_df.columns:
+                    if col == 'Grand Total':
+                        new_cols_e.append(col)
+                    else:
+                        try: new_cols_e.append(str(int(float(col))))
+                        except: new_cols_e.append(str(col))
+                final_elad_df.columns = new_cols_e
+                
+                styled_elad = final_elad_df.style.apply(highlight_pivot, axis=1).format(format_currency)
+                st.dataframe(styled_elad, use_container_width=True)
+            else:
+                st.info("Nincs megjeleníthető SzumElad adat a táblázathoz.")
+
+            st.subheader("📈 SzumElad megoszlása (Főcsoportonként)")
+            chart_df_elad = pdf.groupby(['Kelt_hó', 'Főcsoport'])['SzumElad'].sum().reset_index()
+            chart_df_elad['Kelt_hó'] = chart_df_elad['Kelt_hó'].astype(str) + ". hónap"
+            fig_elad = px.bar(
+                chart_df_elad, x='Kelt_hó', y='SzumElad', color='Főcsoport', 
+                title='Havi SzumElad Termékfajtánkénti (Főcsoport) bontásban', text_auto='.2s'
+            )
+            st.plotly_chart(fig_elad, use_container_width=True)
+
+
+            # Elválasztó
+            st.markdown("---")
+
+
+            # ==========================================
+            # 2. ÁRRÉS SZEKCIÓ (TÁBLÁZAT + DIAGRAM)
+            # ==========================================
+            st.subheader("📊 Termékkörök és Árrés")
+            
+            # Főcsoport Pivot
+            pivot_main = pd.pivot_table(
+                pdf, values='Rés', index='Főcsoport', columns='Kelt_hó',
+                aggfunc='sum', fill_value=0, margins=True, margins_name='Grand Total'
+            )
+            
+            # Alcsoport Pivot
+            pivot_detail = pd.pivot_table(
+                pdf, values='Rés', index=['Főcsoport', 'Alcsoport'], columns='Kelt_hó',
+                aggfunc='sum', fill_value=0, margins=True, margins_name='Grand Total'
+            )
+            
+            rows = []
+            for focsoport, row in pivot_main.iterrows():
+                if focsoport == 'Grand Total':
+                    continue
+                r = row.to_dict()
+                r['Sum of Árrés'] = f"🔹 {focsoport} összesen"
+                rows.append(r)
+                
+                for (m_fo, m_al), d_row in pivot_detail.iterrows():
+                    if m_fo == focsoport and m_fo != 'Grand Total':
+                        dr = d_row.to_dict()
+                        dr['Sum of Árrés'] = f"    {m_al}"
+                        rows.append(dr)
+                        
+            if 'Grand Total' in pivot_main.index:
+                gt = pivot_main.loc['Grand Total'].to_dict()
+                gt['Sum of Árrés'] = "Grand Total"
+                rows.append(gt)
+                
+            final_pivot_df = pd.DataFrame(rows)
+            if not final_pivot_df.empty:
+                counts = {}
+                new_names = []
+                for name in final_pivot_df['Sum of Árrés']:
+                    new_names.append(name + ('\u200B' * counts.get(name, 0)))
+                    counts[name] = counts.get(name, 0) + 1
+                final_pivot_df['Sum of Árrés'] = new_names
+                
+                final_pivot_df = final_pivot_df.set_index('Sum of Árrés')
+                final_pivot_df = final_pivot_df.fillna(0).round(0).astype(int)
+                
+                new_columns = []
+                for col in final_pivot_df.columns:
+                    if col == 'Grand Total':
+                        new_columns.append(col)
+                    else:
+                        try:
+                            new_columns.append(str(int(float(col))))
+                        except:
+                            new_columns.append(str(col))
+                final_pivot_df.columns = new_columns
+                
+                styled_pivot = final_pivot_df.style.apply(highlight_pivot, axis=1).format(format_currency)
+                st.dataframe(styled_pivot, use_container_width=True)
+            else:
+                st.info("Nincs megjeleníthető Árrés adat a táblázathoz.")
+
+            st.subheader("📈 Árrés megoszlása (Főcsoportonként)")
+            chart_df = pdf.groupby(['Kelt_hó', 'Főcsoport'])['Rés'].sum().reset_index()
+            chart_df['Kelt_hó'] = chart_df['Kelt_hó'].astype(str) + ". hónap"
+            fig = px.bar(
+                chart_df, x='Kelt_hó', y='Rés', color='Főcsoport', 
+                title='Havi Árrés Termékfajtánkénti (Főcsoport) bontásban', text_auto='.2s'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        else:
+            st.info("Nincs megjeleníthető adat az adott formátumhoz a kiválasztott szűrés alapján.")
 
 elif view_mode in ["📑 1. Munkafolyamat (ÜK jutalék ellenőrzés)", "📈 2. Munkafolyamat (ÜK Elszámolás)"]:
     title = "📑 1. Munkafolyamat: ÜK jutalék ellenőrzés" if "1. Munkafolyamat" in view_mode else "📈 2. Munkafolyamat: ÜK Elszámolás"
