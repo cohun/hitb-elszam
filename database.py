@@ -135,6 +135,21 @@ def update_custom_fields(record_id: int, uk_kifizet_ho_val: str, kulfold_eur_val
     conn.commit()
     conn.close()
 
+def mass_update_kifizet_ho(record_ids: list, new_ho: str):
+    """Tömegesen frissíti a megadott azonosítójú rekordok kifizetési hónapját."""
+    if not record_ids:
+        return
+    conn = get_connection()
+    cursor = conn.cursor()
+    placeholders = ','.join('?' for _ in record_ids)
+    cursor.execute(f'''
+        UPDATE forgalom
+        SET "ÜK_kifizet_hó" = ?
+        WHERE id IN ({placeholders})
+    ''', [new_ho] + record_ids)
+    conn.commit()
+    conn.close()
+
 def update_jutalek(record_id: int, new_jut_szaz: float, new_jut: float):
     """Frissíti a módosított jutalékot és beállítja a flaget."""
     conn = get_connection()
@@ -146,6 +161,21 @@ def update_jutalek(record_id: int, new_jut_szaz: float, new_jut: float):
             "Jut_modositott" = 1
         WHERE id = ?
     ''', (new_jut_szaz, new_jut, record_id))
+    conn.commit()
+    conn.close()
+
+def update_jutalek_es_uk(record_id: int, new_jut_szaz: float, new_jut: float, new_uk: str):
+    """Frissíti a módosított jutalékot, az üzletkötőt, és beállítja a flaget."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE forgalom
+        SET "Jut_%" = ?,
+            "Jut" = ?,
+            "ÜK" = ?,
+            "Jut_modositott" = 1
+        WHERE id = ?
+    ''', (new_jut_szaz, new_jut, new_uk, record_id))
     conn.commit()
     conn.close()
 

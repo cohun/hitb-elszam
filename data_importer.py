@@ -7,9 +7,9 @@ import database
 # openpyxl figyelmeztetések kikapcsolása
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
-EXCELS_DIR = '/Users/attila/Dev/H-ITB Elszámolás/Excels'
+EXCELS_DIR = 'Excels'
 ALAP_PATH = f'{EXCELS_DIR}/alap_26.xlsx'
-KIMENO_PATH = f'{EXCELS_DIR}/Kimenő számlák.xls'
+KIMENO_PATH = f'{EXCELS_DIR}/Kimenő számlák.xls'
 ELABE_PATH = f'{EXCELS_DIR}/Elabe_lista.xls'
 
 def clean_dict(series_k, series_v):
@@ -87,53 +87,51 @@ def process_and_import():
         # Melyik számlák vannak már az adatbázisban?
         existing_invoices = database.get_existing_invoices()
         
+        # Kifizetett és kifizetetlen eredeti számlák kigyűjtése a sztornók pontosabb kezeléséhez
+        paid_invoices_info = set()
+        unpaid_invoices_info = set()
+        for _, row in df_kimen.iterrows():
+            kif_val = pd.to_numeric(row.get('Kifizetett összeg', 0), errors='coerce')
+            brutto_val = pd.to_numeric(row.get('Bruttó végösszeg', 0), errors='coerce')
+            if pd.isna(kif_val): kif_val = 0.0
+            if pd.isna(brutto_val): brutto_val = 0.0
+            if brutto_val > 0:
+                vevo_name = str(row.get('Vevő neve', '')).strip()
+                if kif_val >= brutto_val:
+                    paid_invoices_info.add((vevo_name, brutto_val))
+                else:
+                    unpaid_invoices_info.add((vevo_name, brutto_val))
+
+        def get_befolyt_status(r_kif, r_brutto, r_vevo):
+            k_val = pd.to_numeric(r_kif, errors='coerce')
+            b_val = pd.to_numeric(r_brutto, errors='coerce')
+            if pd.isna(k_val): k_val = 0.0
+            if pd.isna(b_val): b_val = 0.0
+            if b_val < 0:
+                # Sztornó számla logikája
+                v_name = str(r_vevo).strip()
+                t_brutto = -b_val
+                # Ha van ugyanilyen összegű kifizetetlen eredeti számla, akkor a sztornó ahhoz tartozik:
+                if (v_name, t_brutto) in unpaid_invoices_info:
+                    return 'n'
+                elif (v_name, t_brutto) in paid_invoices_info:
+                    return 'i'
+                else:
+                    return 'n'
+            return 'i' if k_val >= b_val else 'n'
+
         # 1. Befolyt státusz frissítés a meglévő rekordokhoz
-        # Szabály: Ha a Kifizetett összeg >= Bruttó végösszeg -> 'i' különben 'n'
         status_updates = {}
         for _, row in df_kimen.iterrows():
             szla = str(row['Számla száma'])
             if szla in existing_invoices:
-                kif = pd.to_numeric(row['Kifizetett összeg'], errors='coerce') or 0
-                brutto = pd.to_numeric(row['Bruttó végösszeg'], errors='coerce') or 0
-                status_updates[szla] = 'i' if kif >= brutto else 'n'
+                status_updates[szla] = get_befolyt_status(row.get('Kifizetett összeg', 0), row.get('Bruttó végösszeg', 0), row.get('Vevő neve', ''))
                 
         if status_updates:
             print(f"{len(status_updates)} meglévő számla 'Befolyt' státuszának frissítése...")
             database.update_befolyt_status(status_updates)
             
-        # 1.5. ÜK_kifizet_hó értékeinek frissítése az Elszám_26.xlsx fájlból
-        print("ÜK_kifizet_hó adatok szinkronizálása (Elszám_26.xlsx)...")
-        ELSZAM_PATH = f'{EXCELS_DIR}/Elszám_26.xlsx'
-        try:
-            df_elszam = pd.read_excel(ELSZAM_PATH, sheet_name='Sheet1')
-            
-            # Kiszűrjük, ahol ki van töltve a Column1
-            if 'Column1' in df_elszam.columns and 'Szla' in df_elszam.columns:
-                valid_elszam = df_elszam.dropna(subset=['Column1'])
-                if not valid_elszam.empty:
-                    # Szótárt építünk: Szla -> Column1 érték
-                    uk_kifizet_updates = {}
-                    for _, row in valid_elszam.iterrows():
-                        szla = str(row['Szla']).strip()
-                        val = row['Column1']
-                        # Numerikus cella konvertálása, pl. 1.0 -> '1'
-                        try:
-                            val_str = str(int(val))
-                        except Exception:
-                            val_str = str(val).strip()
-                        uk_kifizet_updates[szla] = val_str
-                        
-                    if uk_kifizet_updates:
-                        # Frissítjük a DB-t SQL commandon keresztül
-                        conn = database.get_connection()
-                        cursor = conn.cursor()
-                        print(f"{len(uk_kifizet_updates)} számla ÜK_kifizet_hó értékének frissítése...")
-                        for sz, k_val in uk_kifizet_updates.items():
-                            cursor.execute('UPDATE forgalom SET "ÜK_kifizet_hó" = ? WHERE Szla = ?', (k_val, sz))
-                        conn.commit()
-                        conn.close()
-        except Exception as sheet_err:
-            print(f"Figyelem: Az Elszám_26.xlsx Sheet1 olvasása közben hiba (üres fájl vagy más oszlopok okán): {sheet_err}")
+
 
         # 2. Új számlák kiszűrése és adatbázisba rendezése
         new_kimen = df_kimen[~df_kimen['Számla száma'].astype(str).isin(existing_invoices)]
@@ -218,9 +216,7 @@ def process_and_import():
             else:
                 res = szum_elad - szum_beker
                 
-            kif = pd.to_numeric(krow.get('Kifizetett összeg', 0), errors='coerce')
-            brutto = pd.to_numeric(krow.get('Bruttó végösszeg', 0), errors='coerce')
-            befolyt = 'i' if kif >= brutto else 'n'
+            befolyt = get_befolyt_status(krow.get('Kifizetett összeg', 0), krow.get('Bruttó végösszeg', 0), krow.get('Vevő neve', ''))
             
             res_row = {
                 'Szla': szla,
@@ -254,7 +250,50 @@ def process_and_import():
         if result_rows:
             df_result = pd.DataFrame(result_rows)
             database.insert_new_records(df_result)
-            return True, f"Sikeres frissítés: {len(df_result)} új sor került az adatbázisba!"
+            print(f"Sikeres frissítés: {len(df_result)} új sor került az adatbázisba!")
+        
+        # 1.5. (illetve most már 3.) ÜK_kifizet_hó értékeinek frissítése az Elszám_26.xlsx fájlból
+        print("ÜK_kifizet_hó adatok szinkronizálása (Elszám_26.xlsx)...")
+        ELSZAM_PATH = f'{EXCELS_DIR}/Elszám_26.xlsx'
+        try:
+            df_elszam = pd.read_excel(ELSZAM_PATH, sheet_name='Sheet1')
+            
+            # Kiszűrjük, ahol ki van töltve a Column1
+            if 'Column1' in df_elszam.columns and 'Szla' in df_elszam.columns:
+                valid_elszam = df_elszam.dropna(subset=['Column1'])
+                if not valid_elszam.empty:
+                    # Szótárt építünk: Szla -> Column1 érték
+                    uk_kifizet_updates = {}
+                    for _, row in valid_elszam.iterrows():
+                        szla = str(row['Szla']).strip()
+                        val = row['Column1']
+                        # Numerikus cella konvertálása, pl. 1.0 -> '1'
+                        try:
+                            val_str = str(int(val))
+                        except Exception:
+                            val_str = str(val).strip()
+                        uk_kifizet_updates[szla] = val_str
+                        
+                    if uk_kifizet_updates:
+                        # Frissítjük a DB-t SQL commandon keresztül
+                        conn = database.get_connection()
+                        cursor = conn.cursor()
+                        print(f"{len(uk_kifizet_updates)} számla ÜK_kifizet_hó értékének frissítési kísérlete (csak üres mezőknél)...")
+                        for sz, k_val in uk_kifizet_updates.items():
+                            cursor.execute('''
+                                UPDATE forgalom 
+                                SET "ÜK_kifizet_hó" = ? 
+                                WHERE Szla = ? AND ("ÜK_kifizet_hó" IS NULL OR "ÜK_kifizet_hó" = '')
+                            ''', (k_val, sz))
+                        conn.commit()
+                        conn.close()
+        except Exception as sheet_err:
+            print(f"Figyelem: Az Elszám_26.xlsx Sheet1 olvasása közben hiba (üres fájl vagy más oszlopok okán): {sheet_err}")
+            
+        if result_rows:
+            return True, f"Sikeres frissítés: {len(df_result)} új sor került az adatbázisba, és {len(uk_kifizet_updates) if 'uk_kifizet_updates' in locals() else 0} számla fizetési hónapja szinkronizálva!"
+        else:
+            return True, "Zökkenőmentes frissítés: nincs új számla, de a státuszok és a fizetési hónapok szinkronizálva lettek!"
             
     except Exception as e:
         import traceback

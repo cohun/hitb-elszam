@@ -109,6 +109,30 @@ if view_mode == "📊 Fő Dashboard":
         filtered_df = filtered_df[filtered_df['Termékfajta'] == sel_tf]
         
     st.markdown(f"**Találatok száma: {len(filtered_df)} sor**")
+    st.markdown("---")
+
+    # --- Tömeges Kifizetési Hónap Feltöltés ---
+    st.subheader("🗓️ Tömeges Kifizetési Hónap Feltöltés")
+    # Kiszűrjük a JELENLEGES szűrésből amik befolytak (i), de nincs kifizetési hónap
+    missing_ho_df = filtered_df[(filtered_df['Befolyt'] == 'i') & (filtered_df['ÜK_kifizet_hó'].isna() | (filtered_df['ÜK_kifizet_hó'] == '') | (filtered_df['ÜK_kifizet_hó'] == 'None'))]
+    
+    st.write(f"A fenti szűrés alapján **{len(missing_ho_df)} db** olyan tétel van jelenleg kiválasszva, amely már **befolyt**, de **még nincs megadva** hozzá kifizetési hónap.")
+    
+    if not missing_ho_df.empty:
+        col_month, col_btn = st.columns([2, 8])
+        with col_month:
+            mass_month = st.number_input("Hónap (akár 13+ is):", step=1, value=1)
+        with col_btn:
+            st.write("") # Spacer
+            st.write("") # Spacer
+            if st.button("💾 Tömeges Feltöltés Mentése", type='primary'):
+                database.mass_update_kifizet_ho(missing_ho_df['id'].tolist(), str(mass_month))
+                st.success(f"{len(missing_ho_df)} tétel sikeresen frissítve a(z) {mass_month}. hónapra!")
+                time.sleep(1)
+                get_data.clear()
+                st.rerun()
+
+    st.markdown("---")
 
     # --- Adattábla szerkesztő ---
     st.subheader("📝 Adattábla és Egyedi Mező Szerkesztő")
@@ -189,7 +213,7 @@ if view_mode == "📊 Fő Dashboard":
         if szla_input:
             szla_df = df[df['Szla'].astype(str).str.startswith(szla_input + '/') | (df['Szla'] == szla_input)]
             if not szla_df.empty:
-                st.session_state['jut_view_mem'] = szla_df[['id', 'Cikk', 'Megnevezés', 'SzumElad', 'Jut_%', 'Jut', 'Jut_modositott']].copy()
+                st.session_state['jut_view_mem'] = szla_df[['id', 'Cikk', 'Megnevezés', 'ÜK', 'SzumElad', 'Jut_%', 'Jut', 'Jut_modositott']].copy()
                 st.session_state['szla_str_mem'] = szla_df.iloc[0]['Szla']
             else:
                 st.session_state['jut_view_mem'] = None
@@ -202,15 +226,19 @@ if view_mode == "📊 Fő Dashboard":
         
         editor_key = "jut_editor_mem_key"
         
-        # Ez fut le amikor a user szerkeszt egy Jut_% cellát
+        # Ez fut le amikor a user szerkeszt egy Jut_% vagy ÜK cellát
         def on_jut_change():
             if editor_key in st.session_state and "edited_rows" in st.session_state[editor_key]:
                 edits = st.session_state[editor_key]["edited_rows"]
                 mem_df = st.session_state['jut_view_mem']
                 changed = False
                 for row_idx_str, mods in edits.items():
+                    row_idx = int(row_idx_str)
+                    if 'ÜK' in mods:
+                        mem_df.iat[row_idx, mem_df.columns.get_loc('ÜK')] = str(mods['ÜK'])
+                        mem_df.iat[row_idx, mem_df.columns.get_loc('Jut_modositott')] = 1
+                        changed = True
                     if 'Jut_%' in mods:
-                        row_idx = int(row_idx_str)
                         try:
                             # Ha üresre törlik, vegyük 0-nak
                             new_pct_str = mods['Jut_%']
@@ -230,7 +258,7 @@ if view_mode == "📊 Fő Dashboard":
         
         st.data_editor(
             styled_jut_view,
-            disabled=['id', 'Cikk', 'Megnevezés', 'SzumElad', 'Jut', 'Jut_modositott'], # Csak a Jut_% szerkeszthető
+            disabled=['id', 'Cikk', 'Megnevezés', 'SzumElad', 'Jut', 'Jut_modositott'], # Csak a Jut_% és az ÜK szerkeszthető
             key=editor_key,
             hide_index=True,
             use_container_width=True,
@@ -246,7 +274,7 @@ if view_mode == "📊 Fő Dashboard":
                 for idx, row in mem_df.iterrows():
                     # Amelyiknél 1-es a modositott flag (lehet eleve is 1 volt, de updateeljük ha kell)
                     if row['Jut_modositott'] == 1:
-                        database.update_jutalek(row['id'], row['Jut_%'], row['Jut'])
+                        database.update_jutalek_es_uk(row['id'], row['Jut_%'], row['Jut'], str(row['ÜK']))
                         has_jut_updates = True
                 
                 if has_jut_updates:

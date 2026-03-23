@@ -3,7 +3,7 @@ cd /d "%~dp0"
 echo --- H-ITB Elszamolas Inditasa (Windows) ---
 
 IF NOT EXIST venv (
-    echo Virtualis kornyezet (/venv/) letrehozasa...
+    echo Virtualis kornyezet venv letrehozasa...
     python -m venv venv
 )
 
