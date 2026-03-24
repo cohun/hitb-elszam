@@ -191,8 +191,8 @@ def process_and_import():
                     sum_darab_elabe += e_menny
                     
                 if szum_beker_temp > 0:
-                    szum_beker = szum_beker_temp
-                    beker_ar = szum_beker / sum_darab_elabe if sum_darab_elabe > 0 else 0.0
+                    beker_ar = szum_beker_temp / sum_darab_elabe if sum_darab_elabe > 0 else 0.0
+                    szum_beker = darab * beker_ar
             
             # Fallback a kimenő számlából, ha az Elábé üres vagy nullás értéket adott
             if szum_beker == 0.0:
