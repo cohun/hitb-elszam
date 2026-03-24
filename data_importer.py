@@ -210,11 +210,7 @@ def process_and_import():
             jutalek = szum_elad * (jut_szaz / 100.0)
             
             # A képlet: Rés = SzumElad - SzumBeker, ahol SzumBeker az Elábéből jön (Mennyiség * Beker)
-            # Előlegek/jóváírások miatti korrekció: IF([@SzumElad]<0;[@SzumElad]-[@SzumBeker]*-1;[@SzumElad]-[@SzumBeker])
-            if szum_elad < 0:
-                res = szum_elad - (szum_beker * -1)
-            else:
-                res = szum_elad - szum_beker
+            res = szum_elad - szum_beker
                 
             befolyt = get_befolyt_status(krow.get('Kifizetett összeg', 0), krow.get('Bruttó végösszeg', 0), krow.get('Vevő neve', ''))
             

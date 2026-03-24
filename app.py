@@ -374,15 +374,19 @@ if view_mode == "📊 Fő Dashboard":
         
         if selected_month_str != "Összes":
             sel_m = int(selected_month_str.split('.')[0])
-            pdf = pdf_full[pdf_full['Kelt_hó'] == sel_m]
+            pdf = pdf_full[pdf_full['Kelt_hó'] == sel_m].copy()
         else:
-            pdf = pdf_full
+            pdf = pdf_full.copy()
             
         if not pdf.empty:
             # A felhasználó logikája: a "Főcsoport" az valójában a Termékfajta (Alap, Beruházás)
             # Az "Alcsoport" pedig a Termékkör (Acélsodronyok, stb.)
             pdf.loc[:, 'Főcsoport'] = pdf['Termékfajta'].replace(['', None], 'Ismeretlen').fillna('Ismeretlen')
             pdf.loc[:, 'Alcsoport'] = pdf['Termékkör'].replace(['', None], 'Ismeretlen').fillna('Ismeretlen')
+            
+            # Az Excel pivot táblázatában az Árrés egy Calculated Field: Rés - Jutalék
+            pdf['Árrés_számított'] = pdf['Rés'].fillna(0) - pdf['Jut'].fillna(0)
+
         
             # Közös formázó függvények mindkét táblázathoz
             def highlight_pivot(row):
@@ -485,13 +489,13 @@ if view_mode == "📊 Fő Dashboard":
             
             # Főcsoport Pivot
             pivot_main = pd.pivot_table(
-                pdf, values='Rés', index='Főcsoport', columns='Kelt_hó',
+                pdf, values='Árrés_számított', index='Főcsoport', columns='Kelt_hó',
                 aggfunc='sum', fill_value=0, margins=True, margins_name='Grand Total'
             )
             
             # Alcsoport Pivot
             pivot_detail = pd.pivot_table(
-                pdf, values='Rés', index=['Főcsoport', 'Alcsoport'], columns='Kelt_hó',
+                pdf, values='Árrés_számított', index=['Főcsoport', 'Alcsoport'], columns='Kelt_hó',
                 aggfunc='sum', fill_value=0, margins=True, margins_name='Grand Total'
             )
             
@@ -543,10 +547,10 @@ if view_mode == "📊 Fő Dashboard":
                 st.info("Nincs megjeleníthető Árrés adat a táblázathoz.")
 
             st.subheader("📈 Árrés megoszlása (Főcsoportonként)")
-            chart_df = pdf.groupby(['Kelt_hó', 'Főcsoport'])['Rés'].sum().reset_index()
+            chart_df = pdf.groupby(['Kelt_hó', 'Főcsoport'])['Árrés_számított'].sum().reset_index()
             chart_df['Kelt_hó'] = chart_df['Kelt_hó'].astype(str) + ". hónap"
             fig = px.bar(
-                chart_df, x='Kelt_hó', y='Rés', color='Főcsoport', 
+                chart_df, x='Kelt_hó', y='Árrés_számított', color='Főcsoport', 
                 title='Havi Árrés Termékfajtánkénti (Főcsoport) bontásban', text_auto='.2s'
             )
             st.plotly_chart(fig, use_container_width=True)
