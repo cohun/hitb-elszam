@@ -1,0 +1,10 @@
+CHANGES: {"71": {"Resz_fizetett": true}}
+ROW: 71, REAL_ID: 72, NEW_RESZ: True
+CHANGES: {"71": {"Resz_fizetett": true}}
+ROW: 71, REAL_ID: 72, NEW_RESZ: True
+CHANGES: {"71": {"Resz_fizetett": false}}
+ROW: 71, REAL_ID: 72, NEW_RESZ: False
+CHANGES: {"71": {"Resz_fizetett": true}}
+ROW: 71, REAL_ID: 72, NEW_RESZ: True
+CHANGES: {"71": {"Resz_fizetett": false}}
+ROW: 71, REAL_ID: 72, NEW_RESZ: False

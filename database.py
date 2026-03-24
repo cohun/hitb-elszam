@@ -45,9 +45,16 @@ def init_db():
             -- Lokális / Egyedi mezők amik nem íródnak felül a törzs adatokkal
             "ÜK_kifizet_hó" TEXT,
             "KülföldEUR" REAL,
-            "Jut_modositott" INTEGER DEFAULT 0
+            "Jut_modositott" INTEGER DEFAULT 0,
+            Resz_fizetett INTEGER DEFAULT 0
         )
     ''')
+    
+    # Megpróbáljuk hozzáadni az új oszlopot a meglévő adatbázishoz is
+    try:
+        cursor.execute('ALTER TABLE forgalom ADD COLUMN Resz_fizetett INTEGER DEFAULT 0')
+    except sqlite3.OperationalError:
+        pass # Az oszlop már létezik
     
     # Index létrehozása a gyorsabb kereséshez Szla alapján
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_szla ON forgalom(Szla)')
@@ -134,6 +141,19 @@ def update_custom_fields(record_id: int, uk_kifizet_ho_val: str, kulfold_eur_val
     ''', (uk_kifizet_ho_val, kulfold_eur_val, record_id))
     conn.commit()
     conn.close()
+
+def update_resz_fizetett(record_id: int, is_resz_fizetett: int):
+    """Frissíti a Rész fizetett állapotot az adatbázisban."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE forgalom
+        SET Resz_fizetett = ?
+        WHERE id = ?
+    ''', (is_resz_fizetett, record_id))
+    conn.commit()
+    conn.close()
+
 
 def mass_update_kifizet_ho(record_ids: list, new_ho: str):
     """Tömegesen frissíti a megadott azonosítójú rekordok kifizetési hónapját."""

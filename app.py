@@ -70,6 +70,9 @@ if view_mode == "📊 Fő Dashboard":
     
     # Befolyt2 számítása
     def calc_befolyt2(row):
+        if row.get('Resz_fizetett', 0) == 1:
+            return 'Rész fizetett'
+            
         uk = str(row['ÜK_kifizet_hó']).strip()
         is_empty = (uk == '' or uk.lower() == 'nan' or uk == 'None')
         if is_empty and row['Befolyt'] == 'n':
@@ -107,9 +110,9 @@ if view_mode == "📊 Fő Dashboard":
     if sel_vevo != 'Mind':
         filtered_df = filtered_df[filtered_df['Vevő'] == sel_vevo]
     if sel_befolyt == "Befolyt ('i')":
-        filtered_df = filtered_df[filtered_df['Befolyt'] == 'i']
+        filtered_df = filtered_df[(filtered_df['Befolyt'] == 'i') | (filtered_df['Resz_fizetett'] == 1)]
     elif sel_befolyt == "Kintlévőség ('n')":
-        filtered_df = filtered_df[filtered_df['Befolyt'] == 'n']
+        filtered_df = filtered_df[(filtered_df['Befolyt'] == 'n') & (filtered_df.get('Resz_fizetett', 0) != 1)]
     if sel_tk != 'Mind':
         filtered_df = filtered_df[filtered_df['Termékkör'] == sel_tk]
     if sel_tf != 'Mind':
@@ -120,8 +123,8 @@ if view_mode == "📊 Fő Dashboard":
 
     # --- Tömeges Kifizetési Hónap Feltöltés ---
     st.subheader("🗓️ Tömeges Kifizetési Hónap Feltöltés")
-    # Kiszűrjük a JELENLEGES szűrésből amik befolytak (i), de nincs kifizetési hónap
-    missing_ho_df = filtered_df[(filtered_df['Befolyt'] == 'i') & (filtered_df['ÜK_kifizet_hó'].isna() | (filtered_df['ÜK_kifizet_hó'] == '') | (filtered_df['ÜK_kifizet_hó'] == 'None'))]
+    # Kiszűrjük a JELENLEGES szűrésből amik befolytak (i) VAGY részlet fizetve vannak (1), de nincs kifizetési hónap
+    missing_ho_df = filtered_df[((filtered_df['Befolyt'] == 'i') | (filtered_df['Resz_fizetett'] == 1)) & (filtered_df['ÜK_kifizet_hó'].isna() | (filtered_df['ÜK_kifizet_hó'] == '') | (filtered_df['ÜK_kifizet_hó'] == 'None'))]
     
     st.write(f"A fenti szűrés alapján **{len(missing_ho_df)} db** olyan tétel van jelenleg kiválasszva, amely már **befolyt**, de **még nincs megadva** hozzá kifizetési hónap.")
     
@@ -151,7 +154,10 @@ if view_mode == "📊 Fő Dashboard":
         return ['' if c not in ['Jut_%', 'Jut'] else color for c in row.index]
 
     # Formatálások a jobb olvashatóságért (nem visszamentődik, csak UI)
-    view_df = filtered_df[['id', 'Szla', 'Cikk', 'Termékkör', 'Termékfajta', 'Vevő', 'Dátum', 'Megnevezés', 'SzumElad', 'Jut_%', 'Jut', 'Jut_modositott', 'Befolyt', 'Befolyt2', 'ÜK_kifizet_hó', 'KülföldEUR', 'ÜK']]
+    view_df = filtered_df[['id', 'Szla', 'Vevő', 'Dátum', 'SzumBeker', 'SzumElad', 'Rés', 'ÜK', 'Jut_%', 'Jut', 'Befolyt', 'Befolyt2', 'Resz_fizetett', 'ÜK_kifizet_hó', 'Cikk', 'Termékkör', 'Termékfajta', 'Megnevezés', 'KülföldEUR', 'Jut_modositott']]
+    
+    # A Resz_fizetett oszlopot logikai típusra konvertáljuk a checkboxhoz
+    view_df['Resz_fizetett'] = view_df['Resz_fizetett'].fillna(0).astype(bool)
     
     def format_editor_currency(val):
         if pd.isna(val): return ""
@@ -167,17 +173,49 @@ if view_mode == "📊 Fő Dashboard":
 
     # Alkalmazzuk a Stylert a fő táblázatra is
     styled_view_df = view_df.style.apply(color_modified_jut, axis=1).format({
+        'SzumBeker': format_editor_currency,
         'SzumElad': format_editor_currency,
+        'Rés': format_editor_currency,
         'Jut': format_editor_currency,
         'Jut_%': format_editor_percent
     })
     
     edited_df = st.data_editor(
         styled_view_df,
-        disabled=['id', 'Szla', 'Cikk', 'Termékkör', 'Termékfajta', 'Vevő', 'Dátum', 'Megnevezés', 'SzumElad', 'Jut_%', 'Jut', 'Jut_modositott', 'ÜK', 'Befolyt', 'Befolyt2'], # Csak a kettő maradt szabad
+        column_config={
+            "Resz_fizetett": st.column_config.CheckboxColumn(
+                "Részlet (Skontó)",
+                help="Pipáld be, ha a tétel részlegesen fizetve (skontó) lett, és így elszámolható jutalékra.",
+                default=False,
+            ),
+            "Jut_modositott": None, # Elrejtjük az oszlopot a UI elől, mert pirossal jelezzük
+        },
+
+        disabled=['id', 'Szla', 'Cikk', 'Termékkör', 'Termékfajta', 'Vevő', 'Dátum', 'Megnevezés', 'SzumBeker', 'SzumElad', 'Rés', 'Jut_%', 'Jut', 'Jut_modositott', 'ÜK', 'Befolyt', 'Befolyt2'], # Resz_fizetett, ÜK_kifizet_hó, KülföldEUR szerkeszthető
         hide_index=True,
         use_container_width=True,
         key="data_editor",
+    )
+    
+    # --- Excel Exportálás ---
+    import io
+    
+    @st.cache_data(show_spinner=False)
+    def convert_df_to_excel(df_to_export):
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_to_export.to_excel(writer, index=False, sheet_name='Export')
+        return output.getvalue()
+        
+    export_df = view_df.drop(columns=['Jut_modositott'], errors='ignore')
+    excel_data = convert_df_to_excel(export_df)
+    
+    st.download_button(
+        label="📥 Szűrt Táblázat Letöltése Excel-ként (.xlsx)",
+        data=excel_data,
+        file_name="Hitb_Elszamolas_Kivonat.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="export_btn"
     )
     
     # --- Módosítások mentése ---
@@ -187,23 +225,31 @@ if view_mode == "📊 Fő Dashboard":
         
         has_updates = False
         warning_shown = False
-        
+                    
         for row_idx_str, mods in changes.items():
-            row_idx = int(row_idx_str)
-            
-            real_id = view_df.iloc[row_idx]['id']
-            
-            curr_col = view_df.iloc[row_idx]['ÜK_kifizet_hó']
-            curr_eur = view_df.iloc[row_idx]['KülföldEUR']
-            curr_bef = view_df.iloc[row_idx]['Befolyt']
+            try:
+                row_idx = int(row_idx_str) if str(view_df.index.dtype).startswith(('int', 'int64')) else row_idx_str
+                real_id = int(view_df.loc[row_idx, 'id']) # KÖTELEZŐ natív int() a Numpy int64 SQLite inkompatibilitása miatt!
+                curr_col = view_df.loc[row_idx, 'ÜK_kifizet_hó']
+                curr_eur = view_df.loc[row_idx, 'KülföldEUR']
+                curr_bef = view_df.loc[row_idx, 'Befolyt']
+                curr_resz = view_df.loc[row_idx, 'Resz_fizetett']
+            except KeyError:
+                continue
+
             
             new_col = mods.get('ÜK_kifizet_hó', curr_col)
             new_eur = mods.get('KülföldEUR', curr_eur)
+            new_resz = mods.get('Resz_fizetett', None)
+            if new_resz is not None:
+                database.update_resz_fizetett(real_id, 1 if new_resz else 0)
+                has_updates = True
             
-            # Validáció: ha Befolyt == 'n', nem engedjük az ÜK_kifizet_hó módosítását nem üresre
-            if curr_bef == 'n' and str(new_col).strip() != '' and str(new_col).lower() != 'nan' and new_col is not None:
+            # Validáció: ha Befolyt == 'n' ÉS nem 'Rész fizetett', nem engedjük az ÜK_kifizet_hó módosítását nem üresre
+            is_resz_fizetett = (new_resz == True) if new_resz is not None else (curr_resz == True)
+            if curr_bef == 'n' and not is_resz_fizetett and str(new_col).strip() != '' and str(new_col).lower() != 'nan' and new_col is not None:
                 if not warning_shown:
-                    st.warning("⚠️ Olyan sornál próbáltad megadni a fizetési hónapot, ami még nem folyt be (Befolyt = 'n'). A kifizetési hónap nem mentődött el ennél a sornál.")
+                    st.warning("⚠️ Olyan sornál próbáltad megadni a fizetési hónapot, ami nincs fizetve (Befolyt = 'n'). A kifizetési hónap nem mentődött el ennél a sornál.")
                     warning_shown = True
                 new_col = '' # Blank out the invalid edit
             
@@ -217,6 +263,11 @@ if view_mode == "📊 Fő Dashboard":
         if has_updates:
             st.success("Cella módosítások az adatbázisban sikeresen elmentve!")
             get_data.clear() # Cache törlés hogy azonnal látszódjon a friss
+            
+            # Törölni kell a "data_editor" kulcsot a session_state-ből, hogy megelőzzünk egy végtelen frissítési ciklust
+            if "data_editor" in st.session_state:
+                del st.session_state["data_editor"]
+                
             time.sleep(1)
             st.rerun()
 
@@ -503,6 +554,44 @@ if view_mode == "📊 Fő Dashboard":
         else:
             st.info("Nincs megjeleníthető adat az adott formátumhoz a kiválasztott szűrés alapján.")
 
+    st.markdown("---")
+    
+    # --- Üzletkötői céglista vásárlás szerint ---
+    st.subheader("🏢 Üzletkötői Céglista Vásárlás Szerint")
+    st.write("Az alábbi lista az üzletkötők cégeit mutatja vásárlási forgalom szerinti csökkenő sorrendben. *(Az adatok az oldal tetején lévő szűrők alapján frissülnek.)*")
+    
+    if not filtered_df.empty:
+        uk_vevo_df = filtered_df.groupby(['ÜK', 'Vevő'])['SzumElad'].sum().reset_index()
+        uks = sorted([uk for uk in uk_vevo_df['ÜK'].dropna().unique() if str(uk).strip() != ''])
+        
+        export_vevo_df = uk_vevo_df.sort_values(by=['ÜK', 'SzumElad'], ascending=[True, False]).reset_index(drop=True)
+        export_vevo_df = export_vevo_df.rename(columns={'Vevő': 'Cégnév', 'SzumElad': 'Összes Vásárlás (Ft)'})
+        
+        st.write("")
+        st.download_button(
+            label="📥 Üzletkötői Lista Letöltése Excel-ként",
+            data=convert_df_to_excel(export_vevo_df),
+            file_name="ÜK_Vásárlói_Toplista.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="export_vevo_btn"
+        )
+        st.write("")
+        
+        if len(uks) > 0:
+            tabs = st.tabs(uks)
+            for index, uk in enumerate(uks):
+                with tabs[index]:
+                    uk_data = uk_vevo_df[uk_vevo_df['ÜK'] == uk].sort_values(by='SzumElad', ascending=False).reset_index(drop=True)
+                    uk_data = uk_data.rename(columns={'Vevő': 'Cégnév', 'SzumElad': 'Összes Vásárlás (Ft)'})
+                    uk_data.index = uk_data.index + 1
+                    
+                    st.dataframe(
+                        uk_data[['Cégnév', 'Összes Vásárlás (Ft)']].style.format({'Összes Vásárlás (Ft)': '{:,.0f} Ft'.format}),
+                        use_container_width=True
+                    )
+        else:
+            st.info("Nincs megjeleníthető üzletkötői adat a jelenlegi szűréssel.")
+
 elif view_mode in ["📑 1. Munkafolyamat (ÜK jutalék ellenőrzés)", "📈 2. Munkafolyamat (ÜK Elszámolás)"]:
     title = "📑 1. Munkafolyamat: ÜK jutalék ellenőrzés" if "1. Munkafolyamat" in view_mode else "📈 2. Munkafolyamat: ÜK Elszámolás"
     st.title(title)
@@ -608,8 +697,8 @@ elif view_mode in ["📑 1. Munkafolyamat (ÜK jutalék ellenőrzés)", "📈 2.
         
         # 2. Munkafolyamat szűrő feltételek!
         if "2. Munkafolyamat" in view_mode:
-            # Csak ha be van folyva (i) ÉS az ÜK_kifizet_hó üres (null, üres sztring, NaN)
-            ho_df = ho_df[ (ho_df['Befolyt'] == 'i') & (ho_df['ÜK_kifizet_hó'].isnull() | (ho_df['ÜK_kifizet_hó'] == '') | (ho_df['ÜK_kifizet_hó'] == 'None') ) ]
+            # Csak ha be van folyva (i) VAGY részlet fizetve (1) ÉS az ÜK_kifizet_hó üres (null, üres sztring, NaN)
+            ho_df = ho_df[ ((ho_df['Befolyt'] == 'i') | (ho_df['Resz_fizetett'] == 1)) & (ho_df['ÜK_kifizet_hó'].isnull() | (ho_df['ÜK_kifizet_hó'] == '') | (ho_df['ÜK_kifizet_hó'] == 'None') ) ]
             
         is_first = True
         for uk in selected_uks:
