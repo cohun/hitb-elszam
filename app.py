@@ -871,6 +871,70 @@ elif view_mode == "💼 3. Munkafolyamat (ÜK KTGC)":
     if not active_uks:
         st.warning("Nincs aktív üzletkötő kiválasztva. Kérlek, előbb válaszd ki őket az '1. Munkafolyamat' nézetben!")
     else:
+        st.subheader("📊 Havi Forgalmak (SzumElad) Termékfajtánként és Üzletkötőnként")
+        st.write("Ez a dinamikus, expandálható táblázat az aktuális év kiválasztott adatállományára épül, beépített Excel exporttal.")
+        
+        # DataFrame kiszűrése csak a kijelölt (aktív) üzletkötőkre
+        df_ktgc = df[df['ÜK'].isin(active_uks)].copy()
+        
+        if not df_ktgc.empty:
+            df_ktgc['Kelt_hó'] = df_ktgc['Kelt_hó'].fillna(0).astype(int)
+            
+            pivot_df = pd.pivot_table(
+                df_ktgc, 
+                values='SzumElad', 
+                index=['Termékfajta', 'ÜK'], 
+                columns='Kelt_hó', 
+                aggfunc='sum', 
+                fill_value=0,
+                margins=True,
+                margins_name='Összesen'
+            )
+            
+            # Oszlopok logikus sorrendbe állítása (hónapok számai növekvőben, legvégén az Összesen)
+            cols = list(pivot_df.columns)
+            if 'Összesen' in cols:
+                cols.remove('Összesen')
+                cols.sort(key=lambda x: int(x) if isinstance(x, (int, float)) and x != 0 else 999)
+                cols.append('Összesen')
+                pivot_df = pivot_df[cols]
+                
+            # Oszlopnevek szépítése
+            new_cols = []
+            for c in pivot_df.columns:
+                if c == 0: new_cols.append('Isacr. hó')
+                elif c == 'Összesen': new_cols.append('Összesen')
+                else: new_cols.append(f"{c}. Hó")
+            pivot_df.columns = new_cols
+            
+            format_dict = {col: "{:,.0f} Ft" for col in pivot_df.columns}
+            st.dataframe(
+                pivot_df.style.format(format_dict),
+                use_container_width=True,
+                height=450
+            )
+            
+            import io
+            
+            @st.cache_data(show_spinner=False)
+            def convert_pivot_to_excel(df_to_export):
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df_to_export.to_excel(writer, sheet_name='Forgalmak')
+                return output.getvalue()
+                
+            excel_data = convert_pivot_to_excel(pivot_df)
+            st.download_button(
+                label="📥 Pivot Tábla Letöltése Excel-ként (.xlsx)",
+                data=excel_data,
+                file_name="KTGC_Havi_Forgalmak.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="export_pivot_btn"
+            )
+            st.markdown("---")
+        else:
+            st.info("Nincs elegendő forgalmi adat az üzletkötői csoportosításhoz.")
+    
         with st.expander("🔽 Add meg az üzletkötőnkénti KTGC sarokszámokat (A változtatások automatikusan mentésre kerülnek)", expanded=False):
             # Callback függvény az adatok mentésére az on_change eseményeken
             def save_uk_settings(uk_name):
@@ -937,3 +1001,191 @@ elif view_mode == "💼 3. Munkafolyamat (ÜK KTGC)":
                         st.text_input("Alap limit", value=fmt_money(settings['alap_limit']), key=f"alap_lim_{uk}", on_change=save_uk_settings, args=(uk,))
                     with c6:
                         st.text_input("Bónusz limit", value=fmt_money(settings['bonusz_limit']), key=f"bonusz_lim_{uk}", on_change=save_uk_settings, args=(uk,))
+                                                
+        st.markdown("---")
+        st.subheader("🗓️ Részletes Éves Bónusz és KTGC Kalkuláció Üzletkötőnként")
+        
+        if st.button("🚀 Bónusz Táblázatok Generálása", type='primary', use_container_width=True):
+            with st.spinner("Kalkuláció folyamatban..."):
+                all_html = ""
+                export_dfs = {}
+                
+                for uk in active_uks:
+                    settings = database.get_ktgc_settings(uk)
+                    ossz_terv = settings['ossz_terv']
+                    alap_terv = settings['alap_terv']
+                    beruh_terv = settings['beruhazas_terv']
+                    alap_limit = settings['alap_limit']
+                    bonusz_limit = settings['bonusz_limit']
+                    min_terv = ossz_terv * 0.9
+
+                    df_uk = df[df['ÜK'] == uk].copy()
+                    df_uk['Kelt_hó'] = df_uk['Kelt_hó'].fillna(0).astype(int)
+                    
+                    rows = [
+                        "ELAD 26", "TERV 26", "TÉNY/TERV 26 (%)", "KORRIGÁLT 26", 
+                        "6 % TÉNY 26", "Bonusz_26", "Alap_26", "Ber_26", 
+                        "Kumulált_ber_terv", "BerBon", "KTGC_26", "JUT_26"
+                    ]
+                    months = list(range(1, 13)) + ['SZUM']
+                    calc_dict = {row: {m: 0.0 for m in months} for row in rows}
+                    
+                    for m in range(1, 13):
+                        df_m = df_uk[df_uk['Kelt_hó'] == m]
+                        
+                        alap_26 = df_m[df_m['Termékfajta'] == 'Alap']['SzumElad'].sum()
+                        ber_26 = df_m[df_m['Termékfajta'] == 'Beruházás']['SzumElad'].sum()
+                        elad_26 = alap_26 + ber_26
+                        
+                        # Fix Terv elosztás
+                        terv_26 = ossz_terv / 12.0 if ossz_terv else 0.0
+                        teny_terv_ratio = (elad_26 / terv_26) if terv_26 > 0 else 0.0
+                        
+                        # Havi min. terv: ebből arányosítunk
+                        min_terv_26 = terv_26 * 0.9
+                        
+                        # KTGC base
+                        ktgc_base = elad_26 * teny_terv_ratio * 0.06
+                        if ktgc_base > 300000:
+                            ktgc_base = 300000
+                            
+                        # Korrigált
+                        korrigalt = ktgc_base
+                        if alap_limit > 0 and alap_26 >= alap_limit:
+                            korrigalt = 360000
+                        elif alap_26 < 1500000:
+                            korrigalt = 100000
+                        elif alap_26 >= 1500000 and alap_limit > 0 and alap_26 < alap_limit and ktgc_base < 180000:
+                            korrigalt = 180000
+                            
+                        # Bónusz (Kivétel: Négyesy Gábor vs Mindenki más)
+                        bonusz = 0.0
+                        if uk == 'Négyesy Gábor':
+                            # =IF(D10<$R4;0;IF(D3<$Q4;0;IF(D3>D4;IF(D10>$S4;500000;500000*(D10/$S4)*(D10/$S4));(D3-$Q4)/(D4-$Q4)*500000)))
+                            if alap_limit > 0 and alap_26 < alap_limit:
+                                bonusz = 0
+                            elif elad_26 < min_terv_26:
+                                bonusz = 0
+                            else:
+                                if elad_26 > terv_26:
+                                    if bonusz_limit > 0 and alap_26 > bonusz_limit:
+                                        bonusz = 500000
+                                    elif bonusz_limit > 0:
+                                        bonusz = 500000 * (alap_26 / bonusz_limit) ** 2
+                                else:
+                                    if terv_26 > min_terv_26:
+                                        bonusz = ((elad_26 - min_terv_26) / (terv_26 - min_terv_26)) * 500000
+                        else:
+                            # Alapértelmezett (120k havi fix/arányosított bónusz)
+                            if bonusz_limit > 0 and alap_26 < bonusz_limit:
+                                bonusz = 0
+                            elif elad_26 < min_terv_26:
+                                bonusz = 0
+                            elif elad_26 > terv_26:
+                                bonusz = 120000
+                            elif terv_26 > min_terv_26:
+                                bonusz = ((elad_26 - min_terv_26) / (terv_26 - min_terv_26)) * 120000
+                                
+                        # Negyedéves Beruházás terv és bónusz (3. 6. 9. 12. hónapnál értelmezve)
+                        kum_ber_terv = beruh_terv / 4.0 if beruh_terv else 0.0
+                        berbon = 0.0
+                        if m in [3, 6, 9, 12]:
+                            # Három havi begöngyölített Ber_26
+                            sum_3m_ber = calc_dict["Ber_26"][m-2] + calc_dict["Ber_26"][m-1] + ber_26
+                            
+                            if kum_ber_terv > 0:
+                                ratio = sum_3m_ber / kum_ber_terv
+                                if ratio >= 1.0:
+                                    berbon = 180000
+                                elif ratio >= 0.90:
+                                    berbon = 100000
+                                elif ratio >= 0.75:
+                                    berbon = 60000
+                                    
+                        ktgc_26 = korrigalt + bonusz + berbon
+                        
+                        # Elszámolható Jutalék (i és Rész fizetett - azaz Befolyt2 logika is)
+                        df_jut = df_m[(df_m['Befolyt'] == 'i') | (df_m['Resz_fizetett'] == 1)]
+                        jut_26 = df_jut['Jut'].sum()
+                        
+                        calc_dict["ELAD 26"][m] = elad_26
+                        calc_dict["TERV 26"][m] = terv_26
+                        calc_dict["TÉNY/TERV 26 (%)"][m] = teny_terv_ratio
+                        calc_dict["KORRIGÁLT 26"][m] = korrigalt
+                        calc_dict["6 % TÉNY 26"][m] = ktgc_base
+                        calc_dict["Bonusz_26"][m] = bonusz
+                        calc_dict["Alap_26"][m] = alap_26
+                        calc_dict["Ber_26"][m] = ber_26
+                        calc_dict["Kumulált_ber_terv"][m] = kum_ber_terv
+                        calc_dict["BerBon"][m] = berbon
+                        calc_dict["KTGC_26"][m] = ktgc_26
+                        calc_dict["JUT_26"][m] = jut_26
+                        
+                    # Összegzés oszlop számítása
+                    for r in rows:
+                        if r == "TÉNY/TERV 26 (%)":
+                            sum_elad = sum([calc_dict["ELAD 26"][m] for m in range(1, 13)])
+                            sum_terv = sum([calc_dict["TERV 26"][m] for m in range(1, 13)])
+                            calc_dict[r]["SZUM"] = (sum_elad / sum_terv) if sum_terv > 0 else 0.0
+                        else:
+                            calc_dict[r]["SZUM"] = sum([calc_dict[r][m] for m in range(1, 13)])
+                            
+                    # Konvertálás DataFrame-mé   
+                    res_df = pd.DataFrame(calc_dict).T
+                    res_df.columns = ["Jan", "Febr", "Márc", "Ápr", "Máj", "Jún", "Júl", "Aug", "Szept", "Okt", "Nov", "Dec", "SZUM"]
+                    
+                    # Formázott megjelenítéshez Custom HTML tábla készítése Pandas helyett, így a TÉNY/TERV is %-ként renderelhető
+                    def format_cell(cell, is_pct=False):
+                        if is_pct:
+                            return f"{cell * 100:.2f} %"
+                        return f"{cell:,.0f}".replace(',', ' ')
+                        
+                    html = f"<h4>🧑‍💼 {uk} KTGC Kalkulációs Táblázat</h4>"
+                    html += "<table style='width: 100%; border-collapse: collapse; text-align: right; background-color: #fff; color: #333; font-family: sans-serif; margin-bottom: 2rem; border: 1px solid #ccc;'>"
+                    html += "<thead><tr style='background-color: #d1e7dd;'>"
+                    html += "<th style='padding: 8px; border: 1px solid #ccc; text-align: left;'>Mutató</th>"
+                    for col in res_df.columns:
+                        html += f"<th style='padding: 8px; border: 1px solid #ccc;'>{col}</th>"
+                    html += "</tr></thead><tbody>"
+                    
+                    for row_name, series in res_df.iterrows():
+                        is_pct = (row_name == "TÉNY/TERV 26 (%)")
+                        row_bg = "#f8f9fa" if res_df.index.get_loc(row_name) % 2 == 0 else "#ffffff"
+                        if "KTGC_26" in row_name or "JUT_26" in row_name: row_bg = "#fff3cd" # Kiemelés a fő eredményeknek
+                            
+                        html += f"<tr style='background-color: {row_bg};'>"
+                        html += f"<td style='padding: 8px; border: 1px solid #ccc; text-align: left; font-weight: bold;'>{row_name}</td>"
+                        
+                        for col in res_df.columns:
+                            val_str = format_cell(series[col], is_pct)
+                            # Ha 0 a bónusznál/kumuláltnál, talán szebb üresen hagyni? Ne, hagyjuk 0-n.
+                            html += f"<td style='padding: 8px; border: 1px solid #ccc;'>{val_str}</td>"
+                        html += "</tr>"
+                    html += "</tbody></table>"
+                    
+                    all_html += html
+                    export_dfs[uk] = res_df
+                    
+                # Megjelenítés a kliensnek
+                st.markdown(all_html, unsafe_allow_html=True)
+                
+                # Közös Excel export készítése mindnekinél külön sheet-re
+                if export_dfs:
+                    import io
+                    @st.cache_data(show_spinner=False)
+                    def convert_all_to_excel(df_dict):
+                        output = io.BytesIO()
+                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                            for sheet_name, table_df in df_dict.items():
+                                safe_sheet_name = sheet_name[:31] # Excel limit Max 31 chars
+                                table_df.to_excel(writer, sheet_name=safe_sheet_name)
+                        return output.getvalue()
+                        
+                    excel_data = convert_all_to_excel(export_dfs)
+                    st.download_button(
+                        label="📥 Az Összegző Táblázatok Letöltése Egyetlen Excel Fájlban (Lapfüleken bontva)",
+                        data=excel_data,
+                        file_name="Eves_KTGC_Bonus_Jelentesek.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="export_full_report_btn"
+                    )

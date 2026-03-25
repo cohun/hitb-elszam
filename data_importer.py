@@ -142,10 +142,42 @@ def process_and_import():
             
         print(f"{len(new_kimen['Számla száma'].unique())} új számla feldolgozása...")
         
+        # Kedvezmények kiszámítása számlánként (arányosítás)
+        invoice_ratios = {}
+        for szla, group in new_kimen.groupby('Számla száma'):
+            p_val = str(group['Pénznem'].iloc[0]).strip().upper()
+            netto_veg = pd.to_numeric(group['Nettó végösszeg'].iloc[0], errors='coerce')
+            arfolyam = pd.to_numeric(group['Árfolyam'].iloc[0], errors='coerce')
+            if pd.isnull(netto_veg): netto_veg = 0.0
+            if pd.isnull(arfolyam): arfolyam = 0.0
+            
+            calc_sum = 0.0
+            for _, r in group.iterrows():
+                db = pd.to_numeric(r.get('Mennyiség', 0), errors='coerce')
+                if pd.isnull(db): db = 0.0
+                
+                if p_val and p_val != 'HUF' and arfolyam > 0:
+                    k_ar = pd.to_numeric(r.get('Külföldi ár', 0), errors='coerce')
+                    if pd.isnull(k_ar): k_ar = 0.0
+                    calc_sum += k_ar * db * arfolyam
+                else:
+                    e_ar = pd.to_numeric(r.get('Egységár', 0), errors='coerce')
+                    if pd.isnull(e_ar): e_ar = 0.0
+                    calc_sum += e_ar * db
+            
+            target_netto_huf = netto_veg * arfolyam if (p_val and p_val != 'HUF' and arfolyam > 0) else netto_veg
+            
+            ratio = 1.0
+            if calc_sum != 0 and target_netto_huf != 0 and abs(calc_sum - target_netto_huf) > 2.0: # Minimális kerekítési hibát engedünk
+                ratio = target_netto_huf / calc_sum
+                
+            invoice_ratios[str(szla)] = ratio
+        
         # Eredmény Dataframe összeállítása
         result_rows = []
         for _, krow in new_kimen.iterrows():
             szla = str(krow.get('Számla száma', ''))
+            ratio = invoice_ratios.get(szla, 1.0)
             cikk = str(krow.get('Cikkszám', ''))
             
             # Kikeressük az Elábé-ből a vonatkozó sort:
@@ -203,13 +235,28 @@ def process_and_import():
             elad_ar = pd.to_numeric(krow.get('Egységár', 0), errors='coerce')
             if pd.isnull(elad_ar): elad_ar = 0.0
             
+            penznem = str(krow.get('Pénznem', '')).strip().upper()
+            kulf_ar = pd.to_numeric(krow.get('Külföldi ár', 0), errors='coerce')
+            arfolyam = pd.to_numeric(krow.get('Árfolyam', 0), errors='coerce')
+            if pd.isnull(kulf_ar): kulf_ar = 0.0
+            if pd.isnull(arfolyam): arfolyam = 0.0
+            
+            # Külföldi pénznem esetén az Excelben sokszor hibás a forint 'Egységár' 
+            # (múltbeli árfolyammal számol), ezért mindig újrakalkuláljuk.
+            if penznem and penznem != 'HUF' and arfolyam > 0 and kulf_ar != 0:
+                elad_ar = kulf_ar * arfolyam
+                
+            # Átvételi és számlavégi kedvezmény arányosítása (ratio)
+            elad_ar = elad_ar * ratio
+            
             szum_elad = elad_ar * darab
             
             jut_szaz = pd.to_numeric(krow.get('Jutalék %', 0), errors='coerce')
             if pd.isnull(jut_szaz): jut_szaz = 0.0
             jutalek = szum_elad * (jut_szaz / 100.0)
             
-            # A képlet: Rés = SzumElad - SzumBeker, ahol SzumBeker az Elábéből jön (Mennyiség * Beker)
+            # A képlet: Rés = SzumElad - SzumBeker.
+            # (Stornó számláknál a Darab eleve negatív, emiatt mindkét érték negatív, így a kivonás automatikusan helyes marad!)
             res = szum_elad - szum_beker
                 
             befolyt = get_befolyt_status(krow.get('Kifizetett összeg', 0), krow.get('Bruttó végösszeg', 0), krow.get('Vevő neve', ''))
